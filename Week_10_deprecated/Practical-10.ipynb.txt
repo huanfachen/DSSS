@@ -1,0 +1,1103 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "<div style=\"float:left\">\n",
+    "    <h1 style=\"width:600px\">Workshop 10: Advanced Clustering</h1>\n",
+    "    <h3 style=\"width:600px\">CASA0006: Data Science for Spatial Systems</h3>\n",
+    "    <h3 style=\"width:600px\">Author: Huanfa Chen</h3>\n",
+    "</div>\n",
+    "<div style=\"float:right\"><img width=\"100\" src=\"https://github.com/jreades/i2p/raw/master/img/casa_logo.jpg\" /></div>"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Introduction\n",
+    "\n",
+    "In this workshop, you will practice the following skills:\n",
+    "\n",
+    "1. Using various clustering methods (e.g. kmeans, DBSCAN, hierarchical, max-p) to analyse the housing price and population data in London; \n",
+    "2. Describing and analysing the clustering results;\n",
+    "3. Selecting the key parameters for kmeans clustering and hierarchical clustering."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Last executed: 2022-02-11 12:49:02\n"
+     ]
+    }
+   ],
+   "source": [
+    "import datetime\n",
+    "now = datetime.datetime.now()\n",
+    "print(\"Last executed: \" + now.strftime(\"%Y-%m-%d %H:%M:%S\"))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Preparation\n",
+    "We will download the GIS and London housing data from the London DataStore. Here, we will practice with Linux/Windows commands to automatically download the data. If you are not familiar with these commands, you can download the data by visiting the URL in the browser and then saving the dataset to a folder. \n",
+    "\n",
+    "*Hint: make sure that you put the dataset in the same folder as this Python notebook.*"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import pysal as ps\n",
+    "import numpy as np\n",
+    "import pandas as pd\n",
+    "import seaborn as sns\n",
+    "import geopandas as gpd\n",
+    "import matplotlib.pyplot as plt\n",
+    "import plotly.express as px\n",
+    "\n",
+    "from math import ceil\n",
+    "\n",
+    "from sklearn.neighbors import NearestNeighbors\n",
+    "from sklearn.cluster import KMeans, DBSCAN, OPTICS, AgglomerativeClustering\n",
+    "from esda.adbscan import ADBSCAN\n",
+    "\n",
+    "from scipy.cluster.hierarchy import dendrogram\n",
+    "\n",
+    "import spopt\n",
+    "from spopt.region import MaxPHeuristic as MaxP\n",
+    "import matplotlib.pyplot as plt\n",
+    "\n",
+    "import libpysal\n",
+    "import warnings"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Next we will download the data. The ```wget``` command will work for Mac and Linux, but not for Windows. If you are using Windows and get the following error, don't panic - just open the url on your browser and save the zip file to an appropriate folder.\n",
+    "\n",
+    "```\n",
+    "'wget' is not recognized as an internal or external command, operable program or batch file.\n",
+    "```"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# note that this dataset contains all 7201 MSOAs in England. This dataset is used as it contains the high resolution boundary and neighbour topology of MSOAs \n",
+    "url = 'https://github.com/jreades/fsds/raw/master/data/src/Middle_Layer_Super_Output_Areas__December_2011__EW_BGC_V2-shp.zip'\n",
+    "\n",
+    "! wget $url"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gdf = gpd.read_file(f\"zip://Middle_Layer_Super_Output_Areas__December_2011__EW_BGC_V2-shp.zip!Middle_Layer_Super_Output_Areas__December_2011__EW_BGC_V2.shp\")\n",
+    "gdf.info()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Next, we will download the house price in a csv file from the [London DataStore](data.london.gov.uk). "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df = pd.read_csv('https://data.london.gov.uk/download/average-house-prices/bdf8eee7-41e1-4d24-90ce-93fe5cf040ae/land-registry-house-prices-MSOA.csv', na_values=[':'], low_memory=False)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "print(df.shape)\n",
+    "measure = 'Mean'\n",
+    "year = 2017\n",
+    "df = df[(df.Year==f'Year ending Dec {year}') & (df.Measure==measure)].copy().reset_index()\n",
+    "df.drop(index=df[df.Value.isna()].index, inplace=True)\n",
+    "print(df.shape)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df['Measure'] = df.Measure.astype('category')\n",
+    "df['Value'] = df.Value.astype('int')\n",
+    "df.drop(columns=['index'], inplace=True)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "ppd = pd.merge(gdf, df, left_on='MSOA11CD', right_on='Code', how='inner').reset_index()\n",
+    "ppd.shape"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "How many MSOAs are there in the **ppd** dataset? In other words, how many MSOAs are there in London?"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# ppd.shape[??]\n",
+    "ppd.shape[0]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "ppd[ppd.Value.isin([ppd.Value.max(), ppd.Value.min()])][['index','MSOA11CD','MSOA11NM','Value']]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def replace_legend_items(legend, mapping):\n",
+    "    for txt in legend.texts:\n",
+    "        for k,v in mapping.items():\n",
+    "            if txt.get_text() == str(k):\n",
+    "                txt.set_text(v)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "tfont = {'fontname':'Liberation Sans Narrow', 'horizontalalignment':'left'}"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Next, we will enrich the MSOA with population data. We will download the MSOA census data and merge with the ppd data."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# note that this dataset contains all 7201 MSOAs in England. This dataset is used as it contains the high resolution boundary and neighbour topology of MSOAs \n",
+    "url = 'https://data.london.gov.uk/download/statistical-gis-boundary-files-london/9ba8c833-6370-4b11-abdc-314aa020d5e0/statistical-gis-boundaries-london.zip'\n",
+    "\n",
+    "! wget $url"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gdf_london_msoa_census = gpd.read_file(f\"zip://statistical-gis-boundaries-london.zip!statistical-gis-boundaries-london/ESRI/MSOA_2011_London_gen_MHW.shp\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gdf_london_msoa_census.columns"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gdf_london_msoa_census = gdf_london_msoa_census[['MSOA11CD', 'USUALRES', 'HHOLDRES', 'POPDEN']]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "ppd = pd.merge(ppd, gdf_london_msoa_census, left_on='MSOA11CD', right_on='MSOA11CD', how='inner').reset_index()\n",
+    "ppd.shape"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Raw Distribution"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "What is the housing price distribution in London? We can use some plots and maps to showcase the distribution."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "f = plt.figure()\n",
+    "f.set_size_inches(12,7)\n",
+    "\n",
+    "ax1 = f.add_subplot()\n",
+    "ppd.plot(column='Value', legend=True, cmap='plasma', figsize=(12,6), ax=ax1)\n",
+    "\n",
+    "f.subplots_adjust(top=0.92)\n",
+    "f.suptitle(f\"{measure} House Prices (Raw)\", x=0.025, size=24, **tfont);\n",
+    "plt.savefig('Cluster-House-Prices-Raw.png', dpi=150)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Variable Selection and Standardisation"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "We will use the ```RobustScaler``` class from the ```sklearn``` package for standardising the dataset. Alternatively, you can use the ```MinMaxScaler``` class.\n",
+    "\n",
+    "The RobustScaler is robust to outlier. It removes the median and scales the data according to the quantile range (defaults to between 25 quantile and 75 quantile, also called the Interquartile Range or IQR).\n",
+    "\n",
+    "If you are not sure about these two classes, have a quick read of the documentation."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from sklearn.preprocessing import RobustScaler, MinMaxScaler\n",
+    "rs = RobustScaler(quantile_range=(10.0, 90.0))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "ppd.head()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Here we focus on three variables: \n",
+    "\n",
+    "* ```POPDEN```: population density\n",
+    "* ```Value```: the mean house prices\n",
+    "* ```USUALRES```: number of usual residents\n",
+    "* ```HHOLDRES```: number of household residents\n",
+    "\n",
+    "On the other hand, we should include the ```MSOA11CD``` variable as the index of MSOAs. If you want to know more about the ```index``` in a Pandas DataFrame (or Series), please read the documentation."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "raw = ppd[['MSOA11CD','USUALRES','HHOLDRES', 'POPDEN','Value']].set_index('MSOA11CD').copy()\n",
+    "raw.head()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Plot a histogram of the mean house prices with 150 bins. Complete the code."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "raw.???.plot.hist(???=150)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "normed = raw.copy()\n",
+    "for c in raw.columns.values:\n",
+    "    normed[c] = rs.fit_transform(raw[c].values.reshape(-1,1))\n",
+    "    print(\"The range of {} is [{}, {}]\".format(c, normed[c].min(), normed[c].max()))\n",
+    "normed.head()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "One important note on `scikit-learn`: the `scikit-learn` methods operate in a very similar fashion, regardless of the approach you are using. It uses the `.fit()` or `.fit_transform()` function execute the model and return results. Each model will take different arguments, but the same approach is used every time."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Make a scatter plot between **Value** (on the y axis) and **POPDEN** (on the x axis).\n",
+    "\n",
+    "Think about this question: is it that the higher population density, the higher average house price?"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "normed.plot.scatter(x= ???, y=???)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Functions"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "A function for mapping the clustering results:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def mapping_clusters(labels_cluster):\n",
+    "    ppd['cluster_nm'] = labels_cluster\n",
+    "    ppd.plot(column='cluster_nm', categorical=True, legend=True, figsize=(12,8), cmap='Paired');"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "A function for the radar plot of the cluster centroids:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# adapted from this tutorial: https://towardsdatascience.com/how-to-make-stunning-radar-charts-with-python-implemented-in-matplotlib-and-plotly-91e21801d8ca\n",
+    "def radar_plot_cluster_centroids(df_cluster_centroid):\n",
+    "    # parameters\n",
+    "    # df_cluster_centroid: a dataframe with rows representing a cluster centroid and columns representing variables\n",
+    "    \n",
+    "    # add an additional element to both categories and restaurants that’s identical to the first item\n",
+    "    # manually 'close' the line\n",
+    "    categories = df_cluster_centroid.columns.values.tolist()\n",
+    "    categories = [*categories, categories[0]]\n",
+    "    \n",
+    "    label_loc = np.linspace(start=0, stop=2 * np.pi, num=len(categories))\n",
+    "    \n",
+    "    plt.figure(figsize=(12, 8))\n",
+    "    plt.subplot(polar=True)\n",
+    "    for index, row in df_cluster_centroid.iterrows():\n",
+    "        centroid = row.tolist()\n",
+    "        centroid = [*centroid, centroid[0]]\n",
+    "        label = \"Cluster {}\".format(index)\n",
+    "        plt.plot(label_loc, centroid, label=label)\n",
+    "    plt.title('Cluster centroid comparison', size=20, y=1.05)\n",
+    "    lines, labels = plt.thetagrids(np.degrees(label_loc), labels=categories)\n",
+    "    plt.legend()\n",
+    "    plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## DBSCAN\n",
+    "\n",
+    "So, let's run the DBSCAN clustering method. According to the [documentation](http://scikit-learn.org/stable/modules/generated/sklearn.cluster.DBSCAN.html), the model can take a number of parameters: the `eps` distance and `min_samples` group size attributes are fundamental in creating the clusters. I've suggested some values below, but we'll try amending those later.\n",
+    "\n",
+    "### First DBSCAN"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "minPts = 5 # we set minPts as normed.shape[1] + 1 \n",
+    "epsilon = 0.2\n",
+    "dbsc = DBSCAN(eps=epsilon, min_samples=minPts)\n",
+    "dbsc.fit(normed)\n",
+    "\n",
+    "# We now have our DBSCAN object created, and we can extract the groups it has identified. We do this using the `.labels_` method.\n",
+    "cluster_nm = dbsc.labels_\n",
+    "\n",
+    "mapping_clusters(cluster_nm)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Some might think there are five clusters corresponding to five different colours - don't presume! If you understand DBSCAN, it classifies the points that are far away from others as outliers.\n",
+    "\n",
+    "According to the DBSCAN [documentation](https://scikit-learn.org/stable/modules/generated/sklearn.cluster.DBSCAN.html), it says:\n",
+    "\n",
+    "```\n",
+    "Noisy samples are given the label -1.\n",
+    "```\n",
+    "\n",
+    "The MSOAs in blue (labelled -1) are actually noise samples. So the above map show there are FOUR clusters.\n",
+    "\n",
+    "How many MSOAs are there in each cluster?"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "We can summarise the number of MSOAs in each cluster, using the ```value_counts``` function."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "pd.Series(dbsc.labels_).value_counts()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "You can also visualise the cluster centroid using the radar plot."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df_dbscan = normed.copy()\n",
+    "df_dbscan['cluster'] = dbsc.labels_\n",
+    "df_dbscan_centroid = df_dbscan.groupby('cluster').mean()\n",
+    "# drop the outlier\n",
+    "df_dbscan_centroid.drop(-1, inplace=True)\n",
+    "# df_dbscan_centroid.reset_index()\n",
+    "radar_plot_cluster_centroids(df_dbscan_centroid)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**So what do you think of the results? Do the clusters look useful or realistic?**"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The next thing to do is measure the formation of the clusters. We can do this through a range of measures - described in detail here [here](http://scikit-learn.org/stable/modules/clustering.html#clustering-evaluation). Most of these measures, however, require a groundtruth relating to how a cluster should look (e.g. help us supervise the creation of the clusters. Unfortunately, we do not have such groundtruth.\n",
+    "\n",
+    "The only measure that can help is the Silhouette Score, which calculates how close points are on average to points their clustered with, relative to points they are not clustered with.\n",
+    "\n",
+    "The `scikit-learn` algorithm ([docs](http://scikit-learn.org/stable/modules/clustering.html#silhouette-coefficient)) for Silhouette Score simply takes the data and the generated labels. A score closer to one indicates strong clustering, negative scores indicate poor clustering.\n",
+    "\n",
+    "**Run the code below to first load the library, then extract the Silhouette Score for the clusters created above.**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from sklearn import metrics\n",
+    "metrics.silhouette_score(normed, dbsc.labels_)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The best and worst value of the silhouette score is 1 and -1, respectively. Values near 0 indicate overlapping clusters. Negative values generally indicate that a sample has been assigned to the wrong cluster, as a different cluster is more similar."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Now you can change the value of ```eps``` and ```minPts``` and see whether the clustering quality has been improved. You can always use the Silhouette score to measure the clustering quality."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Kmeans"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "In this part, we will use the K-Means method on the same dataset. "
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### First Kmeans\n",
+    "\n",
+    "First, we try k=4, as the result of DBSCAN indicates that there might be 4 clusters."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from sklearn.cluster import KMeans"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The workflow of K-Means is very similar with that of DBSCAN."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "k_cluster = 4\n",
+    "random_seed = 1\n",
+    "kmeans_method = KMeans(n_clusters=k_cluster,random_state=random_seed)\n",
+    "kmeans_method.fit(normed)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "You can visualise the clusters on the map."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "mapping_clusters(kmeans_method.labels_);"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "You can also visualise the cluster centroid using the radar plot."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df_cluster_centroid = pd.DataFrame(kmeans_method.cluster_centers_, columns=normed.columns)\n",
+    "radar_plot_cluster_centroids(df_cluster_centroid)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Randonness of K-Means"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "K-Means involves randomness. The parameter of **random_state** controls the initialisation of the cluster centroids. If you change the value of random_state, the initial centroids will be different and you will probably get a different clustering. If you don't specify the random_state in the code, then every time you execute your code a new random value is generated and the train and test datasets would have different values each time.\n",
+    "\n",
+    "The reason for setting the random_state here is to reproduce the result. But in real-world projects, you are not encouraged to manipulate the result via testing with different random_state values.\n",
+    "\n",
+    "A common practice with K-Means (and other algorithms involving randomness) is to run the algorithm many times using different random seeds and then choose the best result, such as the result with the lowest SSE. In the sklearn K-Means function, the parameter of **n_init** (default at 10) specifies the number of times the K-Means algorithm will be run with different centroid seeds. The final result will be the best output of **n_init** runs in terms of inertia (aka, SSE).\n",
+    "\n",
+    "Read more about K-Means in the [documentation](https://scikit-learn.org/stable/modules/generated/sklearn.cluster.KMeans.html)."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Finding the 'right' number of clusters\n",
+    "\n",
+    "Next, you will try the Elbow method to choose the k value. The idea behind the Elbow method is to identify the value of k where the distortion begins to decrease most rapidly. At this value, if you continue to increase the k, you will not get much decrease on the SSE."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# calculate SSE for a range of number of cluster\n",
+    "list_SSE = []\n",
+    "min_k = 1\n",
+    "max_k = 10\n",
+    "range_k = range(min_k, max_k+1)\n",
+    "for i in range_k:\n",
+    "    km = KMeans(\n",
+    "        n_clusters=i, init='random',\n",
+    "        n_init=10, max_iter=300,\n",
+    "        tol=1e-04, random_state=0\n",
+    "    )\n",
+    "    km.fit(normed)\n",
+    "    # inertia is a concept from physics. Roughly it means SSE of clustering.\n",
+    "    list_SSE.append(km.inertia_)\n",
+    "\n",
+    "# plot\n",
+    "plt.plot(range_k, list_SSE, marker='o')\n",
+    "plt.xlabel('Number of clusters')\n",
+    "plt.ylabel('SSE')\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "From the SSE plot, you can see that **three** might be the optimal k value. Can you re-run the K-Means function with k = 3?"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "k_cluster = ??\n",
+    "random_seed = ??\n",
+    "kmeans_method = KMeans(??=??,??=??)\n",
+    "kmeans_method.fit(??)\n",
+    "\n",
+    "# plotting\n",
+    "mapping_clusters(???.labels_);"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Hierarchical clustering"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "We will test the Agglomerative Clustering (one type of hierarchical clustering) for this dataset. \n",
+    "\n",
+    "First, we will generate and plot the dendrogram from the clustering process. This shows the hierarchy of the clusters.\n",
+    "\n",
+    "Given the hundreds of data points, the whole dendrogram starting from the individual level would be complicated and challenging to visualise. Therefore, we will show the top three levels of the dendrogram. \n",
+    "\n",
+    "The code of **plot_dendrogram** is largely based on this [tutorial](https://scikit-learn.org/stable/auto_examples/cluster/plot_agglomerative_dendrogram.html#sphx-glr-auto-examples-cluster-plot-agglomerative-dendrogram-py). More details about the dendrogram function from scipy is [here](https://docs.scipy.org/doc/scipy-1.8.0/html-scipyorg/reference/generated/scipy.cluster.hierarchy.dendrogram.html?highlight=dendrogram#scipy.cluster.hierarchy.dendrogram)."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def plot_dendrogram(model, **kwargs):\n",
+    "    # Create linkage matrix and then plot the dendrogram\n",
+    "\n",
+    "    # create the counts of samples under each node\n",
+    "    counts = np.zeros(model.children_.shape[0])\n",
+    "    n_samples = len(model.labels_)\n",
+    "    for i, merge in enumerate(model.children_):\n",
+    "        current_count = 0\n",
+    "        for child_idx in merge:\n",
+    "            if child_idx < n_samples:\n",
+    "                current_count += 1  # leaf node\n",
+    "            else:\n",
+    "                current_count += counts[child_idx - n_samples]\n",
+    "        counts[i] = current_count\n",
+    "\n",
+    "    linkage_matrix = np.column_stack(\n",
+    "        [model.children_, model.distances_, counts]\n",
+    "    ).astype(float)\n",
+    "\n",
+    "    # Plot the corresponding dendrogram\n",
+    "    dendrogram(linkage_matrix, leaf_rotation=90., **kwargs)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "agg_cluster = AgglomerativeClustering(distance_threshold=0, n_clusters=None).fit(normed)\n",
+    "ax = plt.gca()\n",
+    "plt.title(\"Hierarchical Clustering Dendrogram\")\n",
+    "# plot the top three levels of the dendrogram\n",
+    "plot_dendrogram(agg_cluster, truncate_mode=\"level\", p=3)\n",
+    "plt.xlabel(\"Number of points in node (or index of point if no parenthesis).\")\n",
+    "plt.ylabel('distance')\n",
+    "plt.hlines(10.7, ax.get_xlim()[0], ax.get_xlim()[1], linestyle='dashed', color='r')\n",
+    "plt.hlines(14.8, ax.get_xlim()[0], ax.get_xlim()[1], linestyle='dashed', color='r')\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The next task is to look at this dendrogram and understand the impact of different distance cut-offs on the clusters. \n",
+    "\n",
+    "This dendrogram shows that there is a big gap between the distance of 10.7 to the next merge (at the distance of around 14.8). The distance gap is highlighted by two red dashed lines. Such distance gap in the dendrogram is pretty interesting, as it indicates that the next merge possibly shouldn't happen. In other words, it is likely the things that are merged here really don't belong to the same cluster, telling that four clusters are appropriate here."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "agg_cluster = AgglomerativeClustering(distance_threshold=None, n_clusters=4).fit(normed)\n",
+    "mapping_clusters(agg_cluster.labels_)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "pd.Series(agg_cluster.???).value_counts()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "You can find the mapping from the four clusters to the clusters in the above dendrogram, using the number of points in each cluster.\n",
+    "\n",
+    "In the above dendrogram with the cutoff distance of around 12.5, the four clusters from left and right corresponds to Cluster 3, 2, 1, and 0 in the map."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Regionalisation: max-p problem"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The clusters generated by DBSCAN/Kmeans/Hierarchical clustering methods are not spatially contiguous. In other words, a cluster is very likely to contain MSOAs that are not spatially connected.\n",
+    "\n",
+    "Spatially constrained clustering, also called regionalisation, have been proposed to derive spatially contiguous clusters.\n",
+    "\n",
+    "One such method is the max-p problem. It aims to generate a maximum number of clusters conditioning that:\n",
+    "\n",
+    "1. Each cluster is spatially contiguous. In other words, each cluster is a 'region';\n",
+    "2. The sum of a variable (e.g. population or number of spatial units) of each cluster is above a predefined threshold value. For example, the accumulative population of each cluster is above 10% of the total population.\n",
+    "\n",
+    "Note that the number of clusters generated by the max-p method is not predefined; it is automatically determined by the algorithm.\n",
+    "\n",
+    "This section is based on this [tutorial](https://pysal.org/spopt/notebooks/maxp.html).\n",
+    "\n",
+    "Preparation:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "plt.rcParams[\"figure.figsize\"] = [12, 8]\n",
+    "warnings.filterwarnings(\"ignore\")\n",
+    "\n",
+    "RANDOM_SEED = 123456"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "As the max-p problem is NP-hard and the algorithm is very slow on a dataset with hundreds of spatial units, we will use this algorithm on the MSOAs in the Camden borough.\n",
+    "\n",
+    "Note that the field of MSOA11NM contains the borough name."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "ppd.MSOA11NM.str.contains('Camden')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "camden_msoa = ppd[ppd.MSOA11NM.str.contains('Camden')]\n",
+    "camden_normed = normed.iloc[ppd.MSOA11NM.str.contains('Camden').tolist()]\n",
+    "camden_msoa.shape"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Here we aim to cluster the MSOAs into the maximum number of regions such that each region has at least 10% MOSAs and the homogeneity in several variables is maximised.\n",
+    "\n",
+    "We first define the variables in the dataframe that will be used to measure regional homogeneity:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "attrs_name = camden_normed.columns.values.tolist()\n",
+    "attrs_name"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Next, we specify a number of parameters that will serve as input to the max-p model.\n",
+    "\n",
+    "A spatial weights object expresses the spatial connectivity of the MSOAs:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "w = libpysal.weights.Queen.from_dataframe(camden_msoa)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Then we specify the minimum number of MSOAs contained by each region (threshold):"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "threshold = 0.2 * camden_normed.shape[0]\n",
+    "print(threshold)\n",
+    "camden_normed_copy = camden_normed.copy()\n",
+    "camden_normed_copy[\"count\"] = 1\n",
+    "threshold_name = \"count\""
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The max-p model can then be instantiated and solved. Note that this cell may take quite a long time to run. It takes 36.9 seconds on a 24G Windows 10 desktop."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "%%time\n",
+    "np.random.seed(RANDOM_SEED)\n",
+    "model = MaxP(camden_normed_copy, w, attrs_name, threshold_name, threshold, top_n=3)\n",
+    "model.solve()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "camden_msoa['cluster_max_p'] = model.labels_\n",
+    "camden_msoa.plot(column='cluster_max_p', categorical=True, legend=True, figsize=(12,8), cmap='Paired');"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Wrap-up"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Now that you've practiced four clustering methods, including DBSCAN, Kmeans, hierarchical, and max-p.\n",
+    "\n",
+    "If you want to understand the computational complexity of each approach, you can record the time each approach takes to run. For this purpose, you should explore how to use the `time.time()` function to measure how long the `.fit()` function takes to complete. You can also put the `%%time` on the top of a cell to measure the computing time of this cell.\n",
+    "\n",
+    "What's the next steps?\n",
+    "\n",
+    "- Add a lot more comments to the code to ensure that really have understood what is going on, and then save your own copy of this notebook in a Github repo.\n",
+    "- Try playing with some of the methods and parameters (e.g. replacing RobustScaler with MixMaxScaler, changing the number of clusters in hierarchical clustering) and seeing how your results change.\n",
+    "- Try outputting additional plots that will help you interpret your clustering results (e.g. what is the makeup of cluster 1? Or 6? What has it picked up? What names would I give these clsuters?)."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Credits!\n",
+    "\n",
+    "### Acknowledgements:\n",
+    "\n",
+    "This workshop is largely based on a [notebook](https://github.com/jreades/i2p/blob/master/lectures/10.2-Clustering-Housing.ipynb) developed by [Jon Reades](https://github.com/jreades). \n",
+    "\n",
+    "### References and extensions:\n",
+    "\n",
+    "#### Spatially-constrained clustering:\n",
+    "- [Rgionalization algorithms](https://darribas.org/gds_course/content/bG/lab_G.html#regionalization-algorithms)\n",
+    "- [Max-p-regions algorithm](https://region.readthedocs.io/en/latest/users/max-p-regions/index.html)\n",
+    "\n",
+    "#### In-depth notebooks on kmeans\n",
+    "- [In-depth Kmeans](https://github.com/jakevdp/PythonDataScienceHandbook/blob/master/notebooks/05.11-K-Means.ipynb): part of the 'Python Data Science Handbook'. It illustrates the pros and cons of Kmeans with codes and examples and discusses using Kmeans for non-linear boundaries. HIGHLY recommended if you want to deep dive into Kmeans."
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3.8.10 64-bit",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.8.10"
+  },
+  "toc-autonumbering": false,
+  "toc-showcode": false,
+  "vscode": {
+   "interpreter": {
+    "hash": "916dbcbb3f70747c44a77c7bcd40155683ae19c65e1c03b4aa3499c5328201f1"
+   }
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}
